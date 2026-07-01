@@ -1,0 +1,14 @@
+# 你自己指定的
+.env
+.venv/
+.claude
+graphify-out/
+skills/boss-analyze/
+
+# Python 通用
+*.__pycache__/
+*.py[cod]
+*.so
+dist/
+build/
+*.egg-info/
