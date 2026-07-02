@@ -34,6 +34,9 @@ COOKIE_FILE = Path.home() / ".config" / "boss_zhipin_cookies.json"
 DATA_DIR = Path("data")
 SCREENSHOT_DIR = DATA_DIR / "screenshots"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = Path("log")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / f"{datetime.now().strftime('%Y%m%d')}.log"
 
 # 速率控制
 DELAY_BETWEEN_GREETS = [5000, 15000]     # 每次打招呼后随机等待 (ms)
@@ -76,25 +79,41 @@ SELECTORS = {
             ".job-detail-box", ".job-detail-body", ".job-detail-card",
         ],
         "chat_now": [
+            'button:has-text("继续沟通")', 'a:has-text("继续沟通")',
+            'span:has-text("继续沟通")', '[role="button"]:has-text("继续沟通")',
+            '.btn:has-text("继续沟通")', '[class*="btn"]:has-text("继续沟通")',
+            'text=继续沟通',
             'button:has-text("立即沟通")', 'a:has-text("立即沟通")',
+            'span:has-text("立即沟通")', '[role="button"]:has-text("立即沟通")',
+            '.btn:has-text("立即沟通")', '[class*="btn"]:has-text("立即沟通")',
+            'text=立即沟通',
             '.op-btn-chat', '.job-detail-box .op-btn-chat',
-            '[ka*="btn_communicate"]',
+            '[ka*="btn_communicate"]', '[ka*="communicate"]', '[ka*="chat"]',
         ],
         # 详情页上的"继续沟通"按钮（已打过招呼的岗位）
         "continue_chat": [
             'button:has-text("继续沟通")', 'a:has-text("继续沟通")',
-            'text=继续沟通',
+            'span:has-text("继续沟通")', '[role="button"]:has-text("继续沟通")',
+            '.btn:has-text("继续沟通")', 'text=继续沟通',
         ],
         # 点击"立即沟通"后浮窗中的"继续沟通"按钮
         # BOSS流程: 点"立即沟通"→发默认招呼→浮窗"留在此页，继续沟通"→点此按钮跳转聊天页
         "continue_chat_popup": [
             '.dialog-container button:has-text("继续沟通")',
+            '.dialog-container span:has-text("继续沟通")',
+            '.dialog-container .btn-sure',
             '.boss-dialog__wrapper button:has-text("继续沟通")',
+            '.boss-dialog__wrapper span:has-text("继续沟通")',
             '[class*="dialog"] button:has-text("继续沟通")',
+            '[class*="dialog"] span:has-text("继续沟通")',
             '[class*="popup"] button:has-text("继续沟通")',
             '[class*="modal"] button:has-text("继续沟通")',
+            '[ka="dialog_confirm"]',
             'button:has-text("继续沟通")',
             'a:has-text("继续沟通")',
+            'span:has-text("继续沟通")',
+            '[role="button"]:has-text("继续沟通")',
+            'text=继续沟通',
         ],
         "resume_option": [
             '.resume-online', 'text=默认简历', '[class*="resume"]:has-text("默认")',
@@ -111,6 +130,12 @@ SELECTORS = {
         ],
         "risk_notice": [
             'text=安全验证', 'text=请完成验证', 'text=验证码', 'text=异常操作',
+        ],
+        "job_closed": [
+            'text=职位已关闭', 'text=职位关闭', 'text=该职位已关闭',
+        ],
+        "job_open": [
+            'text=招聘中', 'text=正在招聘', 'text=急聘',
         ],
     },
     # 聊天页面 (https://www.zhipin.com/web/geek/chat) 的 selectors
@@ -150,11 +175,89 @@ def ts() -> str:
 
 def log(action: str, subject: str = "-", status: str = "INFO", details: str = ""):
     suffix = f" {details}" if details else ""
-    print(f"[{ts()}] [{action}] [{subject}] [{status}]{suffix}")
+    line = f"[{ts()}] [{action}] [{subject}] [{status}]{suffix}"
+    print(line)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def normalize(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def build_company_aliases(company: str) -> list[str]:
+    """生成公司名匹配别名，处理有限公司/科技/括号等后缀。"""
+    base = normalize(company)
+    aliases = []
+
+    def add(val: str):
+        val = normalize(val)
+        if val and len(val) >= 2 and val not in aliases:
+            aliases.append(val)
+
+    add(base)
+    plain = re.sub(r"[()（）\[\]【】]", "", base)
+    add(plain)
+
+    suffixes = [
+        "股份有限公司", "有限责任公司", "科技有限公司", "信息技术有限公司",
+        "技术有限公司", "有限公司", "研究院", "集团", "科技", "技术", "公司",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if plain.endswith(suffix) and len(plain) - len(suffix) >= 2:
+                plain = plain[:-len(suffix)]
+                add(plain)
+                changed = True
+    return aliases
+
+
+def build_chat_match_keywords(company: str, job_name: str) -> list[str]:
+    """聊天列表匹配关键词：公司名优先，岗位名兜底。"""
+    keywords = []
+    for alias in build_company_aliases(company):
+        if alias not in keywords:
+            keywords.append(alias)
+
+    job_name = normalize(job_name)
+    if job_name:
+        for n in [10, 8, 6, 4]:
+            if len(job_name) >= n:
+                key = job_name[:n]
+                if key not in keywords:
+                    keywords.append(key)
+        if job_name not in keywords:
+            keywords.append(job_name)
+    return keywords
+
+
+def score_chat_item_text(text: str, company: str, job_name: str) -> int:
+    """给聊天列表项打分：公司名优先，岗位名次之。"""
+    text = normalize(text)
+    if not text:
+        return 0
+
+    score = 0
+    for alias in build_company_aliases(company):
+        if alias in text:
+            score = max(score, 100 + len(alias) * 3)
+
+    job_name = normalize(job_name)
+    if job_name and job_name in text:
+        score = max(score, 70 + len(job_name))
+
+    for n in [10, 8, 6, 4]:
+        if len(job_name) >= n and job_name[:n] in text:
+            score = max(score, 40 + n)
+
+    if any(token in text for token in ["HR", "招聘", "人事", "猎头", "Boss", "BOSS"]):
+        score += 3
+    return score
 
 
 # ============================================================
@@ -608,7 +711,7 @@ def dump_chat_dom(page, label: str = "") -> dict:
                     const els = document.querySelectorAll(sel);
                     for (let i = 0; i < Math.min(els.length, 3); i++) {
                         const el = els[i];
-                        html += `\\n--- ${sel}[${i}] <${el.tagName}> class="${el.className}" ---\\n${el.outerHTML.substring(0, 2000)}\\n`;
+                        html += `\n--- ${sel}[${i}] <${el.tagName}> class="${el.className}" ---\n${el.outerHTML.substring(0, 2000)}\n`;
                     }
                 } catch(e) {}
             }
@@ -617,7 +720,7 @@ def dump_chat_dom(page, label: str = "") -> dict:
                 const bodyChildren = document.body.children;
                 for (let i = 0; i < Math.min(bodyChildren.length, 15); i++) {
                     const el = bodyChildren[i];
-                    html += `\\n--- body>children[${i}] <${el.tagName}> class="${el.className}" ---\\n${el.outerHTML.substring(0, 1500)}\\n`;
+                    html += `\n--- body>children[${i}] <${el.tagName}> class="${el.className}" ---\n${el.outerHTML.substring(0, 1500)}\n`;
                 }
             }
             return html.substring(0, 8000);
@@ -659,6 +762,142 @@ def dump_chat_dom(page, label: str = "") -> dict:
     dump_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     log("DEBUG", label, "DOM", f"完整dump -> {dump_file}")
 
+    return result
+
+
+def dump_job_detail_debug(page, label: str = "", stage: str = "job-detail") -> dict:
+    """Dump 职位详情页 CTA / 弹窗相关 DOM，用于定位按钮缺失问题。"""
+    result = {
+        "url": page.url,
+        "title": "",
+        "stage": stage,
+        "body_text": "",
+        "body_class": "",
+        "candidate_selectors": {},
+        "visible_candidates": {},
+        "job_detail_html": "",
+        "action_area_html": "",
+        "dialog_html": "",
+        "buttons": [],
+    }
+    try:
+        result["title"] = page.title()
+    except Exception:
+        pass
+
+    try:
+        result["body_text"] = normalize(page.locator("body").inner_text())[:5000]
+    except Exception:
+        pass
+
+    try:
+        result["body_class"] = page.evaluate("""() => document.body.className""")
+    except Exception:
+        pass
+
+    selectors_to_probe = {
+        "container": SELECTORS["job_detail"]["container"],
+        "chat_now": SELECTORS["job_detail"]["chat_now"],
+        "continue_chat": SELECTORS["job_detail"]["continue_chat"],
+        "continue_chat_popup": SELECTORS["job_detail"]["continue_chat_popup"],
+        "dialog_container": SELECTORS["job_detail"]["dialog_container"],
+        "risk_notice": SELECTORS["job_detail"]["risk_notice"],
+    }
+    for group, sels in selectors_to_probe.items():
+        for sel in sels:
+            key = f"{group}::{sel}"
+            try:
+                loc = page.locator(sel)
+                count = loc.count()
+                result["candidate_selectors"][key] = count
+                if count > 0:
+                    visible = 0
+                    max_probe = min(count, 3)
+                    for i in range(max_probe):
+                        try:
+                            if loc.nth(i).is_visible(timeout=300):
+                                visible += 1
+                        except Exception:
+                            pass
+                    result["visible_candidates"][key] = visible
+            except Exception as e:
+                result["candidate_selectors"][key] = f"error: {e}"
+
+    try:
+        result["job_detail_html"] = page.evaluate("""() => {
+            const selectors = ['.job-detail-box', '.job-detail-body', '.job-detail-card', '#main', '#wrap'];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) return el.outerHTML.substring(0, 6000);
+            }
+            return document.body ? document.body.outerHTML.substring(0, 6000) : '';
+        }""")
+    except Exception as e:
+        result["job_detail_html"] = f"(error: {e})"
+
+    try:
+        result["action_area_html"] = page.evaluate("""() => {
+            const candidates = Array.from(document.querySelectorAll('button, a, span, div'));
+            for (const el of candidates) {
+                const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                const ka = el.getAttribute('ka') || '';
+                const cls = el.className || '';
+                if (text.includes('立即沟通') || text.includes('继续沟通') ||
+                    ka.includes('communicate') || ka.includes('chat') ||
+                    String(cls).includes('op-btn-chat')) {
+                    return (el.outerHTML || '').substring(0, 4000);
+                }
+            }
+            return '';
+        }""")
+    except Exception as e:
+        result["action_area_html"] = f"(error: {e})"
+
+    try:
+        result["dialog_html"] = page.evaluate("""() => {
+            const selectors = ['.dialog-wrap', '.dialog-container', '.boss-dialog__wrapper', '[class*="dialog"]', '[class*="popup"]'];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) return el.outerHTML.substring(0, 5000);
+            }
+            return '';
+        }""")
+    except Exception as e:
+        result["dialog_html"] = f"(error: {e})"
+
+    try:
+        result["buttons"] = page.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('button, a, span[role="button"], .btn, [ka], [role="button"]'));
+            return nodes.slice(0, 80).map((el, idx) => ({
+                idx,
+                tag: el.tagName,
+                text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+                class: String(el.className || '').slice(0, 120),
+                id: el.id || '',
+                role: el.getAttribute('role') || '',
+                ka: el.getAttribute('ka') || '',
+                href: el.getAttribute('href') || '',
+                visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+            }));
+        }""")
+    except Exception as e:
+        result["buttons"] = [{"error": str(e)}]
+
+    log("DEBUG", label, "JOBDOM", f"stage={stage} url={result['url']}")
+    log("DEBUG", label, "JOBDOM", f"title={result['title']}")
+    log("DEBUG", label, "JOBDOM", f"body_class={result.get('body_class', '')}")
+    log("DEBUG", label, "JOBDOM", f"selector命中={result['candidate_selectors']}")
+    log("DEBUG", label, "JOBDOM", f"selector可见={result['visible_candidates']}")
+    if result.get("action_area_html"):
+        log("DEBUG", label, "JOBDOM", f"action_area_html={result['action_area_html'][:500]}")
+    if result.get("dialog_html"):
+        log("DEBUG", label, "JOBDOM", f"dialog_html={result['dialog_html'][:500]}")
+    if result.get("buttons"):
+        log("DEBUG", label, "JOBDOM", f"buttons样本={result['buttons'][:12]}")
+
+    dump_file = DATA_DIR / f"job_detail_dom_{stage}_{label.replace(' ', '_').replace('/', '_')}_{int(time.time()*1000)}.json"
+    dump_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    log("DEBUG", label, "JOBDOM", f"完整dump -> {dump_file}")
     return result
 
 
@@ -734,25 +973,45 @@ def process_single_job(page, job: dict, resume_summary: str,
     except Exception:
         pass
     sleep_ms(rand(1000, 2000))
+
+    detail_container = resolve_visible(page, SELECTORS["job_detail"]["container"], timeout=5000)
+    if detail_container:
+        log("JOB", label, "INFO", "职位详情容器已出现")
+    else:
+        log("JOB", label, "WARN", "职位详情容器未出现")
     human_scroll(page, rand(200, 500))
+    dump_job_detail_debug(page, label, stage="after-load")
+
+    # Step 2: 职位状态检查（招聘中 / 职位已关闭）
+    hit_open = has_visible(page, SELECTORS["job_detail"]["job_open"], timeout=1000)
+    if not hit_open:
+        hit_open = page_contains_text(page, ["招聘中", "正在招聘", "急聘"])
+
+    hit_closed = has_visible(page, SELECTORS["job_detail"]["job_closed"], timeout=1000)
+    if not hit_closed:
+        hit_closed = page_contains_text(page, ["职位已关闭", "职位关闭", "该职位已关闭"])
+
+    if hit_closed and not hit_open:
+        log("SKIP", label, "INFO", "职位已关闭，跳过后续流程")
+        dump_job_detail_debug(page, label, stage="job-closed")
+        return {"status": "job-closed"}
+
+    if hit_open:
+        log("JOB", label, "INFO", "检测到招聘中，继续后续流程")
+    elif hit_closed:
+        log("JOB", label, "WARN", "同时命中招聘中/关闭态邻近文案，暂不跳过")
 
     # Step 2: 风控检查
     stop = inspect_stop_signals(page)
     if stop:
+        dump_job_detail_debug(page, label, stage=f"stop-{stop['reason']}")
         return {"status": stop["reason"], "stop": True}
 
     # Step 3: 检查是否已经沟通过
     if has_visible(page, SELECTORS["job_detail"]["continue_chat"], timeout=1500):
         log("SKIP", label, "INFO", '页面显示「继续沟通」，此前已打过招呼')
+        dump_job_detail_debug(page, label, stage="already-contacted")
         return {"status": "already-contacted"}
-
-    # Step 4: 生成 LLM 定制招呼语
-    try:
-        greeting = generate_greeting(resume_summary, job, greeting_file)
-        log("LLM", label, "OK", f"招呼语({len(greeting)}字): {greeting[:60]}...")
-    except Exception as e:
-        log("LLM", label, "ERROR", str(e))
-        greeting = f"您好，我对{job.get('name', '这个岗位')}很感兴趣，我的背景和项目经验与岗位要求很匹配，期待与您交流！"
 
     # Step 5: 提取 encryptId → 设置网络拦截 → 点"立即沟通"
     # 从 job link 提取 encryptId（格式: /job_detail/{encryptId}.html）
@@ -781,26 +1040,68 @@ def process_single_job(page, job: dict, resume_summary: str,
 
     page.on("response", on_response)
 
-    chat_btn = resolve_visible(page, SELECTORS["job_detail"]["chat_now"], timeout=5000)
+    chat_btn = None
+    chat_btn_selector = ""
+    for attempt in range(4):
+        per_try_timeout = 2500 if attempt < 3 else 4000
+        if attempt > 0:
+            human_scroll(page, rand(250, 700))
+            sleep_ms(rand(800, 1800))
+        log("CHAT", label, "INFO", f"查找详情页沟通按钮（继续沟通/立即沟通） ({attempt+1}/4, timeout={per_try_timeout}ms)")
+        for sel in SELECTORS["job_detail"]["chat_now"]:
+            try:
+                loc = page.locator(sel)
+                count = loc.count()
+                if count == 0:
+                    continue
+                candidate = loc.first
+                if candidate.is_visible(timeout=per_try_timeout):
+                    chat_btn = candidate
+                    chat_btn_selector = sel
+                    break
+                log("DEBUG", label, "CHATBTN", f"selector未可见: {sel} count={count}")
+            except Exception as e:
+                log("DEBUG", label, "CHATBTN", f"selector异常: {sel} err={str(e)[:120]}")
+        if chat_btn:
+            log("CHAT", label, "INFO", f"命中详情页沟通按钮 selector: {chat_btn_selector}")
+            break
+        dump_job_detail_debug(page, label, stage=f"chat-now-miss-attempt-{attempt+1}")
+
     if not chat_btn:
         page.remove_listener("response", on_response)
-        log("SKIP", label, "WARN", "未找到'立即沟通'按钮")
+        log("SKIP", label, "WARN", "未找到详情页沟通按钮（继续沟通/立即沟通）")
+        capture_screenshot(page, f"missing-chat-button-{label.replace('/', '_')[:40]}")
+        dump_job_detail_debug(page, label, stage="missing-chat-button")
         return {"status": "missing-chat-button"}
 
     human_move_and_click(page, chat_btn)
-    log("CHAT", label, "INFO", "已点「立即沟通」，等待浮窗...")
+    log("CHAT", label, "INFO", "已点击详情页沟通按钮，等待浮窗...")
 
     # Step 5b: 主动等待浮窗弹出（BOSS 发送默认招呼语后弹出浮窗）
-    popup_appeared = has_visible(page, SELECTORS["job_detail"]["continue_chat_popup"], timeout=10000)
+    popup_appeared = False
+    popup_selector = ""
+    for attempt in range(4):
+        per_try_timeout = 2500 if attempt < 3 else 4000
+        log("CHAT", label, "INFO", f"等待浮窗 ({attempt+1}/4, timeout={per_try_timeout}ms)")
+        for sel in SELECTORS["job_detail"]["continue_chat_popup"]:
+            try:
+                popup = page.locator(sel).first
+                if popup.is_visible(timeout=per_try_timeout):
+                    popup_appeared = True
+                    popup_selector = sel
+                    break
+            except Exception:
+                continue
+        if popup_appeared:
+            log("CHAT", label, "INFO", f"浮窗已弹出: {popup_selector}")
+            break
+        sleep_ms(1200)
+        dump_job_detail_debug(page, label, stage=f"popup-wait-{attempt+1}")
     if not popup_appeared:
-        sleep_ms(2000)
-        popup_appeared = has_visible(page, SELECTORS["job_detail"]["continue_chat_popup"], timeout=3000)
-    if popup_appeared:
-        log("CHAT", label, "INFO", "浮窗已弹出")
-    else:
         page.remove_listener("response", on_response)
         log("SKIP", label, "WARN", "浮窗未弹出（可能直接跳转或风控）")
         capture_screenshot(page, "no-popup")
+        dump_job_detail_debug(page, label, stage="no-popup")
         return {"status": "no-popup"}
 
     # Step 6: 从网络响应提取 chat URL 并跳转聊天页
@@ -880,6 +1181,7 @@ def process_single_job(page, job: dict, resume_summary: str,
         if not continue_btn:
             log("SKIP", label, "WARN", "浮窗未找到「继续沟通」按钮")
             capture_screenshot(page, "missing-continue-chat-popup")
+            dump_job_detail_debug(page, label, stage="missing-popup-continue")
             return {"status": "missing-popup-continue"}
 
         new_page = None
@@ -934,6 +1236,7 @@ def process_single_job(page, job: dict, resume_summary: str,
         else:
             log("SKIP", label, "WARN", "点击无跳转且无网络URL，跳过")
             capture_screenshot(page, "no-chat-url")
+            dump_job_detail_debug(page, label, stage="popup-click-no-nav")
             return {"status": "no-chat-url"}
 
     # Step 7: 在聊天页左侧对话列表中定位正确对话
@@ -983,7 +1286,9 @@ def process_single_job(page, job: dict, resume_summary: str,
 
     job_name = job.get("name", "")
     company = job.get("company", "") or job.get("companyName", "")
+    match_keywords = build_chat_match_keywords(company, job_name)
     log("DEBUG", label, "MATCH", f"目标: company='{company}' job_name='{job_name}'")
+    log("DEBUG", label, "MATCH", f"关键词: {match_keywords}")
 
     # 7b: 如果有 iframe，尝试切换到 iframe 内查找对话列表
     for frame in page.frames:
@@ -1022,9 +1327,13 @@ def process_single_job(page, job: dict, resume_summary: str,
             '.chat-list a', '.chat-list li', '[class*="chat-list"] > div',
             '.chat-list > *', 'a[href*="chat"]',
             '[class*="message-item"]', '[class*="chat-card"]',
+            '.user-list [role="listitem"]', '.user-list li', '.friend-content-warp', '.friend-content',
         ]
 
-        found = False
+        best_item = None
+        best_score = 0
+        best_text = ""
+        best_selector = ""
         for sel in conversation_selectors:
             try:
                 items = page.locator(sel)
@@ -1032,38 +1341,42 @@ def process_single_job(page, job: dict, resume_summary: str,
                 if count == 0:
                     continue
                 log("DEBUG", label, "SELECTOR", f"'{sel}' 匹配 {count} 个元素")
-                for j in range(min(count, 30)):
+                for j in range(min(count, 40)):
                     try:
                         item = items.nth(j)
                         text = normalize(item.inner_text())
                     except Exception:
                         continue
-                    # DEBUG: 打印每个元素的前80字
-                    if j < 5 or (text and (company in text or (len(job_name) >= 4 and job_name[:4] in text))):
-                        log("DEBUG", label, "ITEM", f"[{j}] text='{text[:80]}' match={company in text or (len(job_name)>=4 and job_name[:4] in text)}")
-                    if text and (company in text or (len(job_name) >= 4 and job_name[:4] in text)):
-                        try:
-                            human_move_and_click(page, item)
-                            log("CHAT", label, "INFO", f"已点击对话[{j}]: {text[:60]}")
-                            found = True
-                            sleep_ms(rand(1500, 2500))
-                            break
-                        except Exception as e:
-                            log("CHAT", label, "WARN", f"点击对话失败: {e}")
-                if found:
-                    break
+                    score = score_chat_item_text(text, company, job_name)
+                    matched_keywords = [kw for kw in match_keywords if kw and kw in text]
+                    if j < 8 or score > 0:
+                        log("DEBUG", label, "ITEM", f"[{j}] score={score} keywords={matched_keywords[:4]} text='{text[:120]}'")
+                    if score > best_score:
+                        best_item = item
+                        best_score = score
+                        best_text = text
+                        best_selector = sel
             except Exception as e:
                 log("DEBUG", label, "SELECTOR", f"'{sel}' 异常: {e}")
 
-        if not found:
+        if best_item and best_score > 0:
+            try:
+                human_move_and_click(page, best_item)
+                log("CHAT", label, "INFO", f"已点击最佳对话 score={best_score} selector={best_selector} text={best_text[:80]}")
+                sleep_ms(rand(1500, 2500))
+            except Exception as e:
+                log("CHAT", label, "WARN", f"点击最佳对话失败: {e}")
+        else:
             log("CHAT", label, "WARN", "未匹配到目标对话，尝试点击最新对话（兜底）")
             for sel in ['.chat-list-item:first-child', '[class*="chat-item"]:first-child',
-                        '.chat-list > :first-child', 'a[href*="chat"]:first-child']:
+                        '.chat-list > :first-child', 'a[href*="chat"]:first-child',
+                        '.user-list [role="listitem"]:first-child', '.user-list li:first-child']:
                 try:
                     first = page.locator(sel).first
                     if first.is_visible(timeout=1000):
+                        first_text = normalize(first.inner_text())
                         human_move_and_click(page, first)
-                        log("CHAT", label, "INFO", f"已点击 {sel}（兜底）")
+                        log("CHAT", label, "INFO", f"已点击兜底对话 {sel}: {first_text[:80]}")
                         sleep_ms(rand(1500, 2500))
                         break
                 except Exception as e:
@@ -1079,15 +1392,25 @@ def process_single_job(page, job: dict, resume_summary: str,
                 break
         except Exception:
             pass
+        if attempt in (2, 5, 8):
+            dump_chat_dom(page, label)
         log("CHAT", label, "INFO", f"等待聊天输入框... ({attempt+1}/10)")
 
     if not chat_input_ready:
         log("SKIP", label, "WARN", "聊天页加载超时，未找到 #chat-input")
         capture_screenshot(page, "chat-page-timeout")
+        dump_chat_dom(page, label)
         return {"status": "chat-page-timeout"}
 
     # Step 9: 填入 LLM 定制招呼语到聊天输入框
     log("CHAT", label, "INFO", "填入LLM定制招呼语")
+
+    try:
+        greeting = generate_greeting(resume_summary, job, greeting_file)
+        log("LLM", label, "OK", f"招呼语({len(greeting)}字): {greeting[:60]}...")
+    except Exception as e:
+        log("LLM", label, "ERROR", str(e))
+        greeting = f"您好，我对{job.get('name', '这个岗位')}很感兴趣，我的背景和项目经验与岗位要求很匹配，期待与您交流！"
 
     # 9a: 先点击输入框获取焦点 → 清空 → 键盘输入（兼容 React/Vue 响应式框架）
     sleep_ms(rand(200, 400))
@@ -1155,7 +1478,7 @@ def process_single_job(page, job: dict, resume_summary: str,
     capture_screenshot(page, f"before-send-{label.replace('/', '_')[:40]}")
 
     # Step 10: 发送招呼语
-    log("CHAT", label, "INFO", "尝试发送招呼语")
+    log("CHAT", label, "INFO", "输入完成，自动触发发送按钮")
     send_ok = False
 
     # 10a: 尝试点击发送按钮（多组候选 selector）

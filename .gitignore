@@ -4,6 +4,9 @@
 .claude
 graphify-out/
 skills/boss-analyze/
+resume
+data
+reports
 
 # Python 通用
 *.__pycache__/
