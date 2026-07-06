@@ -402,16 +402,16 @@ def generate_greeting(resume_summary: str, job: dict, greeting_file: Path) -> st
     user_prompt = build_greeting_prompt(resume_summary, job)
     greeting = call_llm(GREETING_SYSTEM_PROMPT, user_prompt, max_tokens=300)
 
-    if greeting_needs_retry(greeting):
-        log("LLM", "generate_greeting", "WARN", "命中空泛表述，触发一次重试")
-        retry_prompt = (
-            user_prompt
-            + "\n\n【重试修正】上次输出存在空泛匹配表述。"
-            + "这次必须删除‘很匹配/能够胜任/完全符合’之类结论，"
-            + "改为简历里真实出现过的具体项目、技术、业务场景或结果例子。"
-            + "没有依据就不要写。"
-        )
-        greeting = call_llm(GREETING_SYSTEM_PROMPT, retry_prompt, max_tokens=300)
+    # if greeting_needs_retry(greeting):
+    #     log("LLM", "generate_greeting", "WARN", "命中空泛表述，触发一次重试")
+    #     retry_prompt = (
+    #         user_prompt
+    #         + "\n\n【重试修正】上次输出存在空泛匹配表述。"
+    #         + "这次必须删除‘很匹配/能够胜任/完全符合’之类结论，"
+    #         + "改为简历里真实出现过的具体项目、技术、业务场景或结果例子。"
+    #         + "没有依据就不要写。"
+    #     )
+    #     greeting = call_llm(GREETING_SYSTEM_PROMPT, retry_prompt, max_tokens=300)
 
     # 保存到文件
     record = {
