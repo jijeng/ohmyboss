@@ -53,9 +53,25 @@ GREETING_SYSTEM_PROMPT = (
     "你是求职者本人，在BOSS直聘给HR发招呼语。"
     "回复会原样发给HR，严禁任何注释、说明、括号备注、字数统计或引导语。\n"
     "【格式】1.开头前15字必须是“您好，我熟悉XXX、XXX”（填该JD要求且你简历具备的核心技能1-2个）。"
-    "2.紧接“做过XXX”说明简历里与该岗位相关的具体项目/经历。"
+    "2.紧接“做过XXX”说明简历里与该岗位相关的具体项目/经历，必须写出项目、技术、场景或结果等具体信息。"
     "3.结尾是“对xx岗位很感兴趣，期待您的回复“全文80-120字，真诚自然。"
+    "4.必须基于简历或项目经历里的真实内容举例，禁止空泛表述；如果没有具体依据，严禁使用“我的背景和项目经验与岗位要求很匹配”“我认为自己很匹配”“能够胜任”这类笼统结论。"
 )
+VAGUE_GREETING_PHRASES = [
+    "我的背景和项目经验与岗位要求很匹配",
+    "我认为自己很匹配",
+    "能够胜任",
+    "很匹配",
+    "比较匹配",
+    "高度匹配",
+    "完全符合",
+    "非常符合岗位要求",
+]
+CONCRETE_GREETING_ANCHORS = [
+    "项目", "系统", "平台", "场景", "技术栈", "负责", "搭建", "优化", "落地",
+    "上线", "接口", "数据", "分析", "sql", "python", "java", "go", "模型",
+    "提升", "降低", "缩短", "%",
+]
 
 # ============================================================
 # Selectors (ported from tmp/utils.js)
@@ -333,7 +349,12 @@ def build_greeting_prompt(resume_summary: str, job: dict) -> str:
 薪资：{salary}
 地点：{location}
 岗位描述：
-{desc}"""
+{desc}
+
+【硬性要求】
+1. 必须结合简历中的具体项目、技术栈、业务场景或结果举例，至少体现一项具体细节。
+2. 禁止写“我的背景和项目经验与岗位要求很匹配”“我认为自己很匹配”“能够胜任”这类泛化匹配表述。
+3. 禁止脱离简历和岗位描述虚构经历、技术、指标或项目细节。"""
 
 
 def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str:
@@ -368,10 +389,29 @@ def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str
         raise
 
 
+def greeting_needs_retry(greeting: str) -> bool:
+    """命中空泛表述且缺少具体锚点时，要求重试一次。"""
+    text = normalize(greeting).lower()
+    has_vague_phrase = any(phrase.lower() in text for phrase in VAGUE_GREETING_PHRASES)
+    has_concrete_anchor = any(anchor.lower() in text for anchor in CONCRETE_GREETING_ANCHORS)
+    return has_vague_phrase and not has_concrete_anchor
+
+
 def generate_greeting(resume_summary: str, job: dict, greeting_file: Path) -> str:
     """生成招呼语并保存到 data 目录"""
     user_prompt = build_greeting_prompt(resume_summary, job)
     greeting = call_llm(GREETING_SYSTEM_PROMPT, user_prompt, max_tokens=300)
+
+    if greeting_needs_retry(greeting):
+        log("LLM", "generate_greeting", "WARN", "命中空泛表述，触发一次重试")
+        retry_prompt = (
+            user_prompt
+            + "\n\n【重试修正】上次输出存在空泛匹配表述。"
+            + "这次必须删除‘很匹配/能够胜任/完全符合’之类结论，"
+            + "改为简历里真实出现过的具体项目、技术、业务场景或结果例子。"
+            + "没有依据就不要写。"
+        )
+        greeting = call_llm(GREETING_SYSTEM_PROMPT, retry_prompt, max_tokens=300)
 
     # 保存到文件
     record = {
