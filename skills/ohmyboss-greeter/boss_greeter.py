@@ -358,9 +358,18 @@ def build_greeting_prompt(resume_summary: str, job: dict) -> str:
 
 
 def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str:
-    """调用 DeepSeek API 生成招呼语"""
+    """调用 DeepSeek API 生成招呼语
+
+    兼容推理模型（如 deepseek-r1/v4-flash）：
+    - 推理模型先消耗 reasoning_tokens，再输出 content
+    - max_tokens 需足够大（reasoning + content 共享此限制）
+    - 如果 finish_reason=length 且 content 为空，说明 token 不够
+    """
     if not DS_API_KEY:
         raise RuntimeError("未设置 DEEPSEEK_API_KEY 环境变量")
+
+    # 推理模型需要更多 token（reasoning + content 共享 max_tokens）
+    effective_max_tokens = max(max_tokens, 1024)
 
     payload = {
         "model": DS_MODEL,
@@ -368,7 +377,7 @@ def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
         "temperature": 0.7,
     }
     headers = {
@@ -380,9 +389,19 @@ def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str
         resp = httpx.post(DS_ENDPOINT, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        content = (data.get("choices", [{}])[0]
-                   .get("message", {})
-                   .get("content", ""))
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content", "")
+        finish_reason = choice.get("finish_reason", "")
+
+        # 调试：记录 finish_reason 和 token 使用
+        usage = data.get("usage", {})
+        log("LLM", "call_llm", "DEBUG",
+            f"finish_reason={finish_reason} "
+            f"content_len={len(content)} "
+            f"reasoning_tokens={usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0)} "
+            f"total_tokens={usage.get('total_tokens', 0)}")
+
         return content.strip()
     except Exception as e:
         log("LLM", "call_llm", "ERROR", str(e))
@@ -1445,12 +1464,17 @@ def process_single_job(page, job: dict, resume_summary: str,
     # Step 9: 填入 LLM 定制招呼语到聊天输入框
     log("CHAT", label, "INFO", "填入LLM定制招呼语")
 
+    greeting = ""
     try:
         greeting = generate_greeting(resume_summary, job, greeting_file)
         log("LLM", label, "OK", f"招呼语({len(greeting)}字): {greeting[:60]}...")
     except Exception as e:
         log("LLM", label, "ERROR", str(e))
-        greeting = f"您好，我对{job.get('name', '这个岗位')}很感兴趣，我的背景和项目经验与岗位要求很匹配，期待与您交流！"
+
+    # 校验：空招呼语用兜底文案
+    if not greeting or len(greeting.strip()) < 5:
+        log("LLM", label, "WARN", f"招呼语为空或过短(len={len(greeting)})，使用兜底文案")
+        greeting = f"您好，我对{job.get('name', '这个岗位')}很感兴趣，期待与您交流！"
 
     # 9a: 先点击输入框获取焦点 → 清空 → 键盘输入（兼容 React/Vue 响应式框架）
     sleep_ms(rand(200, 400))
