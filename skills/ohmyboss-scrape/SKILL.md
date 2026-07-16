@@ -90,7 +90,7 @@ source .venv/bin/activate && python scraper.py
 - 各关键词的采集量和去重后数量
 - 薪资获取成功率
 - 文件保存位置
-- 提示可以用 `boss-analyze` 进一步分析
+- 提示可以用 `ohmyboss-clean` 进一步清洗
 
 ## 技术要点
 
